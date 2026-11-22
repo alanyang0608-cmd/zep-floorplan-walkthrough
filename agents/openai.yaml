@@ -1,0 +1,4 @@
+interface:
+  display_name: "Zep Floor Plan Walkthrough"
+  short_description: "按户型图先给可走的三维预览，再按需补齐滚动入室、四季与家装"
+  default_prompt: "用 $zep-floorplan-walkthrough 把附件户型图做成能走进去的住宅网页，支持滚动参观和春夏秋冬切换。"
