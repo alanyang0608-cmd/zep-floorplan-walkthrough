@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>户型试走</title>
+<style>
+:root{color-scheme:light;font-family:system-ui,sans-serif;color:#253e35;background:#f7f4eb}
+*{box-sizing:border-box}body{margin:0;height:100vh;height:100dvh;display:grid;grid-template-rows:auto minmax(0,1fr) auto}
+header,footer{display:flex;gap:14px;align-items:center;justify-content:space-between;padding:12px clamp(12px,3vw,40px)}
+h1{font:600 clamp(19px,3.2vw,35px)/1.2 "Songti SC",serif;margin:0}
+button{color:inherit;background:#f7f5ec;border:1px solid #adb6a7;border-radius:20px;padding:7px 12px;cursor:pointer;font:inherit}
+button[aria-pressed=true]{background:#2c4a3c;color:white}button:focus-visible{outline:2px solid #a15134;outline-offset:2px}
+nav{display:flex;gap:4px;flex:none}main{position:relative;min-height:0;overflow:hidden;background:#e9ecdf;border-block:1px solid #c8cfbf}
+canvas{position:absolute;width:100%;height:100%;display:block;touch-action:none}canvas:focus{outline:none}
+[hidden]{display:none!important}footer{font-size:12px;line-height:1.4}#room{font-weight:600;white-space:nowrap}#hint{text-align:right}
+#pad{display:none;position:absolute;bottom:15px;left:15px;width:86px;height:86px;touch-action:none;border-radius:50%;border:2px solid #ffffffa0;background:#213d3277;align-items:center;justify-content:center}
+#pad i{width:32px;height:32px;border-radius:50%;background:#f5f3decc;pointer-events:none}
+@media(pointer:coarse){body.walk #pad{display:flex}}
+@media(max-width:440px){header{gap:7px}nav{font-size:12px}button{padding:7px 9px}footer{padding-bottom:max(12px,env(safe-area-inset-bottom))}}
+</style></head><body>
+<header><h1 id="title">户型试走</h1><nav aria-label="视图">
+<button data-mode="plan" aria-pressed="false">平面</button><button data-mode="overview" aria-pressed="true">立体</button><button data-mode="walk" aria-pressed="false">走进去</button>
+</nav></header>
+<main><canvas id="gl" tabindex="0" aria-label="可行走的三维户型"></canvas><canvas id="plan" hidden aria-label="户型总平面"></canvas><div id="pad" aria-label="移动摇杆"><i></i></div></main>
+<footer><span id="room"></span><span id="hint"></span></footer>
+
+<!-- Replace just this JSON for a first walkable preview. Coordinates are metres. -->
+<script type="application/json" id="layout">
+{
+  "name":"双室小屋 · 虚构示例", "height":2.6, "start":[1.45,4.69], "look":[1.45,2.35],
+  "rooms":[
+    {"name":"起居间","rect":[0,0,3.6,4],"color":"#dfc6a0"},
+    {"name":"书房","rect":[3.6,0,2.4,4],"color":"#cfb185"},
+    {"name":"入户平台","rect":[0.78,4,1.34,1.16],"color":"#b6bcaa","outdoor":true}
+  ],
+  "walls":[
+    {"a":[0,0],"b":[6,0],"open":[[0.45,1.85,0.77,2.12],[4.36,1.1,0.83,2.14]]},
+    {"a":[6,0],"b":[6,4],"open":[[1.20,1.35,0.72,2.10]]},
+    {"a":[0,4],"b":[6,4],"open":[[0.94,1.03,0,2.12]]},
+    {"a":[0,0],"b":[0,4]},
+    {"a":[3.6,0],"b":[3.6,4],"open":[[1.54,1.02,0,2.12]]}
+  ],
+  "items":[
+    {"rect":[0.17,0.52,0.74,1.75],"bottom":0.09,"height":0.39,"color":"#91a284"},
+    {"rect":[0.17,0.52,0.17,1.75],"bottom":0.46,"height":0.34,"color":"#778c71"},
+    {"rect":[1.38,0.79,0.68,0.90],"height":0.35,"color":"#bd8e60"},
+    {"rect":[4.08,0.18,1.4,0.64],"height":0.76,"color":"#b78457"},
+    {"rect":[4.55,1.00,0.46,0.49],"height":0.45,"color":"#8b9c90"}
+  ]
+}
+</script>
+<script>
+'use strict';
+const get=id=>document.getElementById(id);
+const home=JSON.parse(get('layout').textContent);
+const H=home.height||2.65, wallWidth=.12, personRadius=.14, eyeHeight=1.55;
+const regions=home.rooms.map(r=>r.rect);
+const minX=Math.min(...regions.map(r=>r[0])),maxX=Math.max(...regions.map(r=>r[0]+r[2]));
+const minZ=Math.min(...regions.map(r=>r[1])),maxZ=Math.max(...regions.map(r=>r[1]+r[3]));
+const center=[(minX+maxX)/2,.35,(minZ+maxZ)/2];
+const distance=Math.hypot(maxX-minX,maxZ-minZ);
+const blocks=[],wallParts=[];
+const geometry={interior:[],cutaway:[]};
+const keys=new Set(),stick=[0,0];
+const pos=home.start.slice(),startYaw=Math.atan2(home.look[0]-pos[0],-(home.look[1]-pos[1]));
+let yaw=startYaw,pitch=-.08,orbit=-.48,mode='overview',dirty=true,last=0;
+const clamp=(n,a,b)=>Math.max(a,Math.min(n,b));
+function inside(x,z,[a,b,w,d]){return x>=a&&x<=a+w&&z>=b&&z<=b+d;}
+function canStand(x,z){
+  if(![[0,0],[-personRadius,0],[personRadius,0],[0,-personRadius],[0,personRadius]].every(([dx,dz])=>regions.some(r=>inside(x+dx,z+dz,r))))return false;
+  return !blocks.some(([a,b,w,d])=>Math.hypot(Math.max(a-x,0,x-a-w),Math.max(b-z,0,z-b-d))<personRadius);
+}
+function rgb(hex){return [1,3,5].map(i=>parseInt(hex.slice(i,i+2),16)/255);}
+function addBox(vertices,[x,z,w,d],bottom,top,color){
+  if(top<=bottom||w<=0||d<=0)return;
+  const p=[[x,bottom,z],[x+w,bottom,z],[x+w,bottom,z+d],[x,bottom,z+d],[x,top,z],[x+w,top,z],[x+w,top,z+d],[x,top,z+d]];
+  const faces=[[[4,7,6,5],[0,1,0]],[[0,1,2,3],[0,-1,0]],[[4,5,1,0],[0,0,-1]],[[7,3,2,6],[0,0,1]],[[4,0,3,7],[-1,0,0]],[[5,6,2,1],[1,0,0]]];
+  const c=rgb(color);
+  for(const [corners,n] of faces)for(const i of [0,1,2,0,2,3])vertices.push(...p[corners[i]],...n,...c);
+}
+function common(rect,bottom,top,color){
+  addBox(geometry.interior,rect,bottom,top,color);addBox(geometry.cutaway,rect,bottom,top,color);
+}
+for(const room of home.rooms){
+  common(room.rect,-.095,0,room.color||'#d8c7a9');
+  if(!room.outdoor)addBox(geometry.interior,room.rect,H,H+.09,'#f1eadd');
+}
+for(const wall of home.walls){
+  const [ax,az]=wall.a,[bx,bz]=wall.b;
+  if((ax!==bx&&az!==bz)||(ax===bx&&az===bz))throw Error('示例模板需要水平或垂直的非零墙段');
+  const horiz=az===bz,len=Math.abs(horiz?bx-ax:bz-az),dir=Math.sign(horiz?bx-ax:bz-az);
+  function addWall(lo,hi,base,top){
+    if(hi<=lo||top<=base)return;
+    const first=(horiz?ax:az)+Math.min(lo*dir,hi*dir);
+    const r=horiz?[first,az-wallWidth/2,hi-lo,wallWidth]:[ax-wallWidth/2,first,wallWidth,hi-lo];
+    addBox(geometry.interior,r,base,top,wall.color||'#e6dccc');
+    addBox(geometry.cutaway,r,base,Math.min(.64,top),wall.color||'#d9cbb5');
+    if(base===0){blocks.push(r);wallParts.push(r);}
+  }
+  let lastEnd=0;
+  for(const [a,w,sill,head] of [...(wall.open||[])].sort((u,v)=>u[0]-v[0])){
+    if(a<lastEnd||w<=0||a+w>len+.000001||sill<0||sill>=head||head>H||(!sill&&head<=eyeHeight+.1))throw Error('请检查洞口起点、宽度或高度');
+    addWall(lastEnd,a,0,H);addWall(a,a+w,0,sill);addWall(a,a+w,head,H);lastEnd=a+w;
+  }
+  addWall(lastEnd,len,0,H);
+}
+for(const it of home.items||[]){
+  const bottom=it.bottom||0;
+  common(it.rect,bottom,bottom+it.height,it.color||'#a18b74');
+  if(it.solid!==false&&bottom<eyeHeight+.14)blocks.push(it.rect);
+}
+const canvas=get('gl'),map=get('plan'),ctx=map.getContext('2d');
+const gl=canvas.getContext('webgl',{alpha:false,antialias:true});
+let program,uniforms={},buffers={},usable=false;
+function shader(type,source){
+  const s=gl.createShader(type);gl.shaderSource(s,source);gl.compileShader(s);
+  if(!gl.getShaderParameter(s,gl.COMPILE_STATUS))throw Error(gl.getShaderInfoLog(s));
+  return s;
+}
+function initializeScene(){
+  const vert=shader(gl.VERTEX_SHADER,`attribute vec3 point,normal,albedo;
+  uniform vec3 eye,right,up,forward;uniform vec2 scale;varying vec3 tone;
+  void main(){vec3 delta=point-eye;float z=dot(delta,forward);
+    gl_Position=vec4(dot(delta,right)*scale.x,dot(delta,up)*scale.y,1.00038*z-.05601,z);
+    tone=albedo*(.74+.26*max(0.,dot(normal,normalize(vec3(-.42,.82,.38)))));}`);
+  const frag=shader(gl.FRAGMENT_SHADER,'precision mediump float;varying vec3 tone;void main(){gl_FragColor=vec4(tone,1.);}');
+  program=gl.createProgram();gl.attachShader(program,vert);gl.attachShader(program,frag);gl.linkProgram(program);
+  if(!gl.getProgramParameter(program,gl.LINK_STATUS))throw Error(gl.getProgramInfoLog(program));
+  gl.useProgram(program);gl.enable(gl.DEPTH_TEST);
+  for(const name of ['eye','right','up','forward','scale'])uniforms[name]=gl.getUniformLocation(program,name);
+  for(const [key,vertices] of Object.entries(geometry)){
+    const buf=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,buf);gl.bufferData(gl.ARRAY_BUFFER,new Float32Array(vertices),gl.STATIC_DRAW);buffers[key]=buf;
+  }
+  for(const attr of ['point','normal','albedo'])gl.enableVertexAttribArray(gl.getAttribLocation(program,attr));
+}
+if(gl){try{initializeScene();usable=true;}catch(error){console.error(error);}}
+function resize(c){
+  const dpr=Math.min(2,window.devicePixelRatio||1),w=Math.max(1,Math.round(c.clientWidth*dpr)),h=Math.max(1,Math.round(c.clientHeight*dpr));
+  if(c.width!==w||c.height!==h){c.width=w;c.height=h;}
+  return w/h;
+}
+function drawScene(){
+  const aspect=resize(canvas),walking=mode==='walk',sky=walking?[.72,.83,.80]:[.91,.92,.87];
+  gl.viewport(0,0,canvas.width,canvas.height);gl.clearColor(...sky,1);gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);
+  const rad=distance*Math.max(1.22,1.23/aspect);
+  const eye=walking?[pos[0],eyeHeight,pos[1]]:[center[0]+rad*.67*Math.sin(orbit),center[1]+rad*.82,center[2]+rad*.67*Math.cos(orbit)];
+  const dir=walking?[Math.sin(yaw)*Math.cos(pitch),Math.sin(pitch),-Math.cos(yaw)*Math.cos(pitch)]:center.map((v,i)=>v-eye[i]);
+  const norm=Math.hypot(...dir),f=dir.map(v=>v/norm),flat=Math.hypot(f[0],f[2]);
+  const right=[-f[2]/flat,0,f[0]/flat],up=[-right[2]*f[1],flat,right[0]*f[1]];
+  const k=1/Math.tan((walking?65:48)*Math.PI/360);
+  for(const [name,v] of Object.entries({eye,right,up,forward:f}))gl.uniform3fv(uniforms[name],v);
+  gl.uniform2f(uniforms.scale,k/aspect,k);
+  const key=walking?'interior':'cutaway';gl.bindBuffer(gl.ARRAY_BUFFER,buffers[key]);
+  ['point','normal','albedo'].forEach((name,i)=>gl.vertexAttribPointer(gl.getAttribLocation(program,name),3,gl.FLOAT,false,36,i*12));
+  gl.drawArrays(gl.TRIANGLES,0,geometry[key].length/9);
+}
+function drawPlan(){
+  resize(map);const w=map.width,h=map.height,scale=.79*Math.min(w/(maxX-minX),h/(maxZ-minZ));
+  const ox=(w-scale*(maxX+minX))/2,oz=(h-scale*(maxZ+minZ))/2;
+  const pixel=map.width/map.clientWidth;
+  ctx.setTransform(1,0,0,1,0,0);ctx.fillStyle='#eef0e7';ctx.fillRect(0,0,w,h);
+  ctx.setTransform(scale,0,0,scale,ox,oz);
+  for(const r of home.rooms){ctx.fillStyle=r.color||'#d8c7a9';ctx.fillRect(...r.rect);}
+  for(const b of home.items||[]){ctx.fillStyle=b.color||'#a18b74';ctx.fillRect(...b.rect);}
+  ctx.fillStyle='#4c5148';for(const r of wallParts)ctx.fillRect(...r);
+  ctx.setTransform(1,0,0,1,0,0);ctx.fillStyle='#263b32';ctx.font=String(Math.max(11,Math.min(17,scale*.23/pixel))*pixel)+'px system-ui';ctx.textAlign='center';
+  for(const r of home.rooms){const [x,z,rw,rd]=r.rect;ctx.fillText(r.name,ox+(x+rw/2)*scale,oz+(z+rd/2)*scale);}
+}
+const coarse=matchMedia('(pointer:coarse)').matches,entryOpen=canStand(...home.start);
+function setMode(next){
+  if((next!=='plan'&&!usable)||(next==='walk'&&!entryOpen))next='plan';
+  if(next==='walk'&&mode!==next){pos.splice(0,2,...home.start);yaw=startYaw;pitch=-.08;}
+  mode=next;dirty=true;keys.clear();resetStick();canvas.hidden=mode==='plan';map.hidden=!canvas.hidden;
+  document.body.classList.toggle('walk',mode==='walk');
+  document.querySelectorAll('[data-mode]').forEach(b=>{b.setAttribute('aria-pressed',String(b.dataset.mode===mode));b.disabled=(!usable&&b.dataset.mode!=='plan')||(!entryOpen&&b.dataset.mode==='walk');});
+  get('hint').textContent=!entryOpen?'请将起点放在有通行空间的地面上，再试走。':!usable?'可查看平面，三维试走需要支持 WebGL 的浏览器。':mode==='walk'?(coarse?'左下移动 · 拖动画面环顾':'WASD 或方向键移动 · 拖动环顾'):mode==='overview'?'拖动可旋转 · 点「走进去」从入口出发':'点「走进去」从图上的入口出发';
+  get('room').textContent=mode==='walk'?'':mode==='plan'?'平面图':'剖切总览';
+}
+function move(dt){
+  const forward=Number(keys.has('KeyW')||keys.has('ArrowUp'))-Number(keys.has('KeyS')||keys.has('ArrowDown'))-stick[1];
+  const side=Number(keys.has('KeyD'))-Number(keys.has('KeyA'))+stick[0];
+  const turn=Number(keys.has('ArrowRight'))-Number(keys.has('ArrowLeft'));
+  yaw+=turn*dt*1.6;
+  const step=dt*1.48/Math.max(1,Math.hypot(forward,side)),dx=(forward*Math.sin(yaw)+side*Math.cos(yaw))*step,dz=(-forward*Math.cos(yaw)+side*Math.sin(yaw))*step;
+  const count=Math.max(1,Math.ceil(Math.hypot(dx,dz)/.05));
+  for(let i=0;i<count;i++){
+    if(canStand(pos[0]+dx/count,pos[1]))pos[0]+=dx/count;
+    if(canStand(pos[0],pos[1]+dz/count))pos[1]+=dz/count;
+  }
+  const room=home.rooms.find(r=>inside(pos[0],pos[1],r.rect));
+  if(room&&get('room').textContent!==room.name)get('room').textContent=room.name;
+  return Boolean(forward||side||turn);
+}
+let drag=null,stickId=null;
+function resetStick(){stickId=null;stick[0]=stick[1]=0;get('pad').firstElementChild.style.transform='';}
+function setStick(e){const r=get('pad').getBoundingClientRect(),x=e.clientX-r.left-r.width/2,y=e.clientY-r.top-r.height/2,d=Math.max(26,Math.hypot(x,y));stick[0]=x/d;stick[1]=y/d;get('pad').firstElementChild.style.transform='translate('+stick[0]*25+'px,'+stick[1]*25+'px)';}
+const pad=get('pad');
+pad.onpointerdown=e=>{if(stickId!==null)return;stickId=e.pointerId;pad.setPointerCapture(e.pointerId);setStick(e);};
+pad.onpointermove=e=>{if(stickId===e.pointerId)setStick(e);};
+for(const ev of ['pointerup','pointercancel','lostpointercapture'])pad.addEventListener(ev,e=>{if(e.pointerId===stickId)resetStick();});
+canvas.onpointerdown=e=>{if(drag)return;drag={id:e.pointerId,x:e.clientX,y:e.clientY};canvas.setPointerCapture(e.pointerId);canvas.focus({preventScroll:true});};
+canvas.onpointermove=e=>{if(!drag||drag.id!==e.pointerId)return;
+  const dx=e.clientX-drag.x,dy=e.clientY-drag.y;
+  if(mode==='walk'){yaw-=dx*.006;pitch=clamp(pitch+dy*.005,-1.1,1.1);}else orbit-=dx*.008;
+  drag.x=e.clientX;drag.y=e.clientY;dirty=true;};
+for(const ev of ['pointerup','pointercancel','lostpointercapture'])canvas.addEventListener(ev,e=>{if(drag&&drag.id===e.pointerId)drag=null;});
+onkeydown=e=>{if(mode==='walk'&&['KeyW','KeyS','KeyA','KeyD','ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(e.code)){e.preventDefault();keys.add(e.code);}};
+onkeyup=e=>keys.delete(e.code);onblur=()=>{keys.clear();resetStick();drag=null;};
+for(const b of document.querySelectorAll('[data-mode]'))b.onclick=()=>setMode(b.dataset.mode);
+get('title').textContent=document.title=home.name||'户型试走';
+setMode(usable?'overview':'plan');
+new ResizeObserver(()=>{dirty=true;}).observe(document.querySelector('main'));
+function frame(t){const dt=Math.min(.08,(t-last)/1000);last=t;const changed=mode==='walk'&&move(dt);
+  if(dirty||changed){if(mode==='plan')drawPlan();else drawScene();dirty=false;}requestAnimationFrame(frame);}
+requestAnimationFrame(frame);
+</script></body></html>
